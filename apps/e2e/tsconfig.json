@@ -1,0 +1,8 @@
+{
+  "extends": "@company-ops/config/tsconfig/node.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "lib": ["es2024", "dom"]
+  },
+  "include": ["support", "tests", "rehearsal", "*.ts"]
+}

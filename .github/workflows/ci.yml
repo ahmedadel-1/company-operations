@@ -1,0 +1,214 @@
+# Continuous integration (ROADMAP P1-20). Actions are pinned by full commit SHA (docs/DEPENDENCIES.md §7).
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TURBO_TELEMETRY_DISABLED: '1'
+
+jobs:
+  verify:
+    name: Format, lint, typecheck, unit tests, build, contract drift
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0 (version from package.json packageManager)
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm format:check
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - name: OpenAPI document and generated client match the API
+        run: |
+          pnpm --filter @company-ops/api run openapi:emit
+          pnpm --filter @company-ops/api-client run generate:client
+          git diff --exit-code -- packages/api-client
+
+  integration:
+    # Real-service suites: SeaweedFS S3 compatibility plus Testcontainers PostgreSQL, Redis and Keycloak
+    # (tenant isolation, database roles, HTTP security, OIDC login/MFA/logout, outbox/worker).
+    name: Integration (SeaweedFS, PostgreSQL, Redis, Keycloak)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      S3_ENDPOINT: http://127.0.0.1:8333
+      S3_REGION: us-east-1
+      S3_BUCKET: company-ops-ci
+      S3_FORCE_PATH_STYLE: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Start SeaweedFS with per-run credentials
+        run: |
+          S3_ACCESS_KEY_ID="ci$(openssl rand -hex 12)"
+          S3_SECRET_ACCESS_KEY="$(openssl rand -hex 24)"
+          echo "::add-mask::${S3_SECRET_ACCESS_KEY}"
+          echo "S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID}" >> "$GITHUB_ENV"
+          echo "S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY}" >> "$GITHUB_ENV"
+          docker run -d --name seaweedfs -p 127.0.0.1:8333:8333 \
+            -e AWS_ACCESS_KEY_ID="${S3_ACCESS_KEY_ID}" \
+            -e AWS_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY}" \
+            -e S3_BUCKET="${S3_BUCKET}" \
+            chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d \
+            mini -dir=/data
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8333/healthz > /dev/null; then exit 0; fi
+            sleep 2
+          done
+          docker logs seaweedfs
+          exit 1
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:integration
+
+  e2e:
+    # Real Chromium against a disposable stack (Testcontainers PostgreSQL, Redis, Keycloak; built API,
+    # worker and web processes), see apps/e2e/support/global-setup.ts.
+    name: End-to-end (Playwright, Chromium)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install Chromium and its system libraries
+        run: pnpm --filter @company-ops/e2e exec playwright install --with-deps chromium
+      - run: pnpm test:e2e
+      - name: Upload Playwright report and stack logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: playwright-report
+          path: |
+            apps/e2e/playwright-report/
+            apps/e2e/test-results/
+          retention-days: 7
+
+  release-images:
+    # Production artifacts (DEPLOYMENT §5): Compose validation, the four release images, a vulnerability
+    # gate on fixable HIGH/CRITICAL findings (exceptions in .trivyignore, ADR-0015) and CycloneDX SBOMs.
+    name: Release images (Compose config, build, Trivy gate, SBOM)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      TRIVY_VERSION: 0.75.0
+      TRIVY_SHA256: c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate production Compose files
+        run: |
+          export OPS_APP_ENV_FILE="$PWD/infra/compose/app.env.example"
+          all="-f infra/compose/docker-compose.prod.smtp.yml -f infra/compose/docker-compose.prod.jira.yml"
+          all="$all -f infra/compose/docker-compose.prod.github.yml -f infra/compose/docker-compose.prod.private-ca.yml"
+          for overlay in "" "-f infra/compose/docker-compose.prod.external-data.yml" "$all"; do
+            # shellcheck disable=SC2086
+            docker compose --env-file infra/compose/compose.env.example \
+              -f infra/compose/docker-compose.prod.yml $overlay --profile migrate --profile backup config --quiet
+          done
+      - name: Build release images
+        run: |
+          for target in api worker web migrate; do
+            docker build -f infra/docker/app.Dockerfile --target "$target" -t "ops-$target:ci" .
+          done
+      - name: Install Trivy (checksum verified)
+        run: |
+          archive="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -fsSLO "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${archive}"
+          echo "${TRIVY_SHA256}  ${archive}" | sha256sum --check --strict
+          tar -xzf "${archive}" trivy
+      - name: Vulnerability gate (fixable HIGH and CRITICAL)
+        run: |
+          for target in api worker web migrate; do
+            ./trivy image --no-progress --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+              --ignorefile .trivyignore --exit-code 1 "ops-$target:ci"
+          done
+      - name: SBOMs (CycloneDX)
+        run: |
+          mkdir -p sbom
+          for target in api worker web migrate; do
+            ./trivy image --no-progress --format cyclonedx --output "sbom/ops-$target.cdx.json" "ops-$target:ci"
+          done
+      - name: Pinned third-party images (report only; reviewed per docs/SECURITY.md §13)
+        run: |
+          grep -oE 'image: [^ ]+@sha256:[0-9a-f]{64}' infra/compose/docker-compose.prod.yml | cut -d' ' -f2 | sort -u |
+            while read -r image; do
+              ./trivy image --no-progress --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 0 "$image"
+            done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom
+          path: sbom/
+          retention-days: 90
+
+  dependency-audit:
+    name: Dependency audit (pnpm audit, ADR-0015)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - run: pnpm audit --audit-level high
+
+  codeql:
+    name: CodeQL (JavaScript/TypeScript)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: javascript-typescript
+          build-mode: none
+          queries: security-extended
+      - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: /language:javascript-typescript
+
+  secret-scan:
+    name: Secret scan (gitleaks CLI)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks (checksum verified)
+        run: |
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSLO "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          echo "${GITLEAKS_SHA256}  ${archive}" | sha256sum --check --strict
+          tar -xzf "${archive}" gitleaks
+      - name: Scan repository history
+        run: ./gitleaks git --redact --verbose --exit-code 1 .

@@ -1,0 +1,59 @@
+packages:
+  - apps/*
+  - packages/*
+
+# Supply-chain guard (ROADMAP P1-1). Explicitly configured, so pnpm enforces it strictly.
+minimumReleaseAge: 1440
+
+# Exact versions approved in docs/DEPENDENCIES.md that were published less than 24 h before Phase 1A
+# (2026-10-02). Version-pinned so the exemption never applies to any other release. Remove each entry
+# once that version is older than minimumReleaseAge.
+minimumReleaseAgeExclude:
+  - '@aws-sdk/client-s3@3.1145.0'
+  - '@aws-sdk/s3-request-presigner@3.1145.0'
+  - '@types/node@24.19.1'
+  - nestjs-pino@5.3.0
+  - next-intl@4.14.9
+  - use-intl@4.14.9
+  - icu-minify@4.14.9
+  - next-intl-swc-plugin-extractor@4.14.9
+  # Approved web dependencies first installed in Phase 1 (2026-10-02), same rule as above.
+  - '@tanstack/react-query@5.104.1'
+  - '@tanstack/query-core@5.104.1'
+  - lucide-react@1.50.0
+
+# `pnpm audit` exceptions (ADR-0015). Each is a transitive dependency of the pinned Prisma CLI
+# (prisma@7.10.0) on a code path this project never executes. Re-evaluate on every Prisma upgrade.
+auditConfig:
+  ignoreGhsas:
+    # deepmerge-ts < 8 (stack exhaustion on recursive input): only merges the static prisma.config.ts.
+    - GHSA-ggr8-5vv4-36mx
+    # mysql2 < 3.22 / <= 3.23.0 (auth downgrade, zlib inflate): MySQL driver; only PostgreSQL is used.
+    - GHSA-3f6p-5ww8-9rcr
+    - GHSA-rgwj-5xj2-c3m3
+    # braces <= 3.0.3 (stack exhaustion on deeply nested patterns, no patched release): lint-time only, via
+    # @next/eslint-plugin-next > fast-glob > micromatch; expands our own lint globs, absent from every image.
+    - GHSA-vfj7-8cjw-p6xm
+
+# Fail the install when a dependency has build scripts that were not reviewed here.
+strictDepBuilds: true
+
+# Reviewed dependency build scripts.
+allowBuilds:
+  # Prisma 7 engines (ADR-0006).
+  prisma: true
+  '@prisma/engines': true
+  # SWC native binding used by unplugin-swc under Vitest (ADR-0009).
+  '@swc/core': true
+  # Install-time telemetry.
+  '@scarf/scarf': false
+  # Prebuilt platform binaries arrive as optional dependencies; the scripts are source-build fallbacks.
+  '@parcel/watcher': false
+  msgpackr-extract: false
+  unrs-resolver: false
+  # testcontainers (via docker-modem): native SSH acceleration for Docker-over-SSH only; tests use the
+  # local Docker socket / named pipe.
+  ssh2: false
+  cpu-features: false
+  # Post-install version notice only (pulled in by testcontainers' gRPC dependency chain).
+  protobufjs: false

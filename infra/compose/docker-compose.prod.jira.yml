@@ -1,0 +1,16 @@
+# Jira Cloud integration (INTEGRATIONS §1, DEPLOYMENT §6). Add only after the live verification checklist
+# in DEPLOYMENT §6 passed on a non-production Jira site; without this overlay the integration is disabled
+# and the admin page says so. Set JIRA_OAUTH_CLIENT_ID in the application env file.
+services:
+  api:
+    environment:
+      JIRA_OAUTH_CLIENT_SECRET_FILE: /run/secrets/jira_oauth_client_secret
+    secrets: [jira_oauth_client_secret]
+  worker:
+    environment:
+      JIRA_OAUTH_CLIENT_SECRET_FILE: /run/secrets/jira_oauth_client_secret
+    secrets: [jira_oauth_client_secret]
+
+secrets:
+  jira_oauth_client_secret:
+    file: ${OPS_SECRETS_DIR}/jira_oauth_client_secret

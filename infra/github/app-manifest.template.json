@@ -1,0 +1,22 @@
+{
+  "name": "Company Operations (example.com)",
+  "url": "https://ops.example.com",
+  "description": "Read-only pull-request, review and check status for Company Operations projects.",
+  "public": false,
+  "hook_attributes": {
+    "url": "https://ops.example.com/api/v1/webhooks/github",
+    "active": true
+  },
+  "redirect_url": "https://ops.example.com/admin/integrations/github",
+  "callback_urls": ["https://ops.example.com/api/v1/integrations/github/callback"],
+  "setup_url": "https://ops.example.com/api/v1/integrations/github/setup",
+  "setup_on_update": true,
+  "request_oauth_on_install": false,
+  "default_permissions": {
+    "metadata": "read",
+    "pull_requests": "read",
+    "checks": "read",
+    "statuses": "read"
+  },
+  "default_events": ["repository", "pull_request", "pull_request_review", "check_suite", "check_run", "status"]
+}

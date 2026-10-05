@@ -1,0 +1,41 @@
+{
+  "name": "company-operations",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.8.1",
+  "engines": {
+    "node": ">=24.0.0 <25",
+    "pnpm": "12.8.1"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint && eslint .",
+    "typecheck": "turbo run typecheck && tsc --noEmit -p tsconfig.json",
+    "test": "turbo run test",
+    "test:integration": "turbo run test:integration",
+    "test:e2e": "turbo run build --filter=@company-ops/web --filter=@company-ops/api --filter=@company-ops/worker && pnpm --filter @company-ops/e2e run test:e2e",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "env:init": "node scripts/create-dev-env.ts",
+    "infra:up": "docker compose --env-file .env -f infra/compose/docker-compose.dev.yml up -d --wait",
+    "infra:down": "docker compose --env-file .env -f infra/compose/docker-compose.dev.yml down",
+    "infra:ps": "docker compose --env-file .env -f infra/compose/docker-compose.dev.yml ps",
+    "db:generate": "pnpm --filter @company-ops/db run generate",
+    "db:migrate": "pnpm --filter @company-ops/db run migrate:dev",
+    "db:migrate:deploy": "pnpm --filter @company-ops/db run migrate:deploy",
+    "db:migrate:status": "pnpm --filter @company-ops/db run migrate:status",
+    "db:seed": "turbo run build --filter=@company-ops/core && pnpm --filter @company-ops/core run seed:dev",
+    "bootstrap": "turbo run build --filter=@company-ops/core && pnpm --filter @company-ops/core run bootstrap",
+    "activity:rebuild": "turbo run build --filter=@company-ops/core && pnpm --filter @company-ops/core run activity:rebuild"
+  },
+  "devDependencies": {
+    "@company-ops/eslint-config": "workspace:*",
+    "@types/node": "24.19.1",
+    "eslint": "10.11.0",
+    "prettier": "3.9.9",
+    "turbo": "2.11.6",
+    "typescript": "6.0.3"
+  }
+}

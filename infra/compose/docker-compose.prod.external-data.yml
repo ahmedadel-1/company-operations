@@ -1,0 +1,21 @@
+# Managed/external PostgreSQL and Redis instead of the bundled containers. Add after
+# docker-compose.prod.yml. The bundled services move to a profile that is never started, and the
+# applications reach the external services through the `edge` network (outbound).
+#
+# Before the first migration, create the roles on the external PostgreSQL with
+# infra/docker/postgres/prod-init/01-roles-and-databases.sh (or its SQL), put the external URLs in the
+# database_url, database_migration_url and redis_url secret files (with sslmode=require / rediss:// as the
+# provider requires), and set KEYCLOAK_DB_HOST in compose.env.
+services:
+  postgres:
+    profiles: [bundled-data-disabled]
+  redis:
+    profiles: [bundled-data-disabled]
+  migrate:
+    networks: [edge]
+  # Set OPS_BACKUP_PGHOST; with a managed database, its provider snapshots/PITR are the primary backup
+  # and this logical dump the portable secondary copy.
+  backup:
+    networks: [edge]
+  keycloak:
+    networks: [edge]

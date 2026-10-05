@@ -1,0 +1,7 @@
+{
+  "extends": "@company-ops/config/tsconfig/react-library.json",
+  "compilerOptions": {
+    "rootDir": "."
+  },
+  "include": ["src", "test", "messages", "*.ts"]
+}

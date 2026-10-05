@@ -1,0 +1,23 @@
+# GitHub App integration (INTEGRATIONS §2, DEPLOYMENT §6). Add only after the live verification checklist
+# in DEPLOYMENT §6 passed with a test App and organization; without this overlay the integration is
+# disabled and the admin page says so. Set GITHUB_APP_ID, GITHUB_APP_SLUG and GITHUB_APP_CLIENT_ID in the
+# application env file.
+services:
+  api:
+    environment:
+      GITHUB_APP_PRIVATE_KEY_FILE: /run/secrets/github_app_private_key
+      GITHUB_APP_CLIENT_SECRET_FILE: /run/secrets/github_app_client_secret
+      GITHUB_WEBHOOK_SECRET_FILE: /run/secrets/github_webhook_secret
+    secrets: [github_app_private_key, github_app_client_secret, github_webhook_secret]
+  worker:
+    environment:
+      GITHUB_APP_PRIVATE_KEY_FILE: /run/secrets/github_app_private_key
+    secrets: [github_app_private_key]
+
+secrets:
+  github_app_private_key:
+    file: ${OPS_SECRETS_DIR}/github_app_private_key
+  github_app_client_secret:
+    file: ${OPS_SECRETS_DIR}/github_app_client_secret
+  github_webhook_secret:
+    file: ${OPS_SECRETS_DIR}/github_webhook_secret

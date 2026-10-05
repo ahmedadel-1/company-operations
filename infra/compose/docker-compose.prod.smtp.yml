@@ -1,0 +1,12 @@
+# Email through an authenticated SMTP relay. Add after docker-compose.prod.yml. Set SMTP_HOST, SMTP_PORT,
+# SMTP_SECURE, SMTP_USER and SMTP_FROM in the application env file; the password is a secret file.
+# Without this overlay and with SMTP_HOST empty, email is disabled (deliveries recorded as SKIPPED).
+services:
+  worker:
+    environment:
+      SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+    secrets: [smtp_password]
+
+secrets:
+  smtp_password:
+    file: ${OPS_SECRETS_DIR}/smtp_password

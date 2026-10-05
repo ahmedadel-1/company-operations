@@ -1,0 +1,380 @@
+# Production stack for one Linux host with Docker Engine + Compose v2 (docs/DEPLOYMENT.md §4, runbooks in
+# docs/runbooks/). This is NOT the development stack: no Mailpit, no demo realm or users, no seed, no
+# development object store, no published database/cache ports.
+#
+#   docker compose --env-file /etc/company-ops/compose.env -f infra/compose/docker-compose.prod.yml \
+#     [-f infra/compose/docker-compose.prod.smtp.yml] [-f ...jira.yml] [-f ...github.yml] \
+#     [-f infra/compose/docker-compose.prod.external-data.yml] up -d --wait
+#
+# compose.env (non-secret, see infra/compose/compose.env.example) provides the image tag, host name, paths
+# and application settings. Secrets are files under OPS_SECRETS_DIR, mounted at /run/secrets/<name> and
+# read through the applications' *_FILE variables; none is passed as a plain environment variable.
+#
+# Object storage is external by design (ADR-0008): set S3_* in the application env file to the
+# operator's S3-compatible service.
+
+name: company-ops
+
+x-logging: &logging
+  driver: local
+  options:
+    max-size: '20m'
+    max-file: '5'
+
+x-hardening: &hardening
+  restart: unless-stopped
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ['no-new-privileges:true']
+  logging: *logging
+
+x-app-image-env: &app-env
+  NODE_ENV: production
+
+services:
+  proxy:
+    image: nginx:1.30.5-alpine@sha256:0985e772fb9f729e6fa0980da05fca5d9c468e870eed43071545afa9d2e27d94
+    restart: unless-stopped
+    read_only: true
+    security_opt: ['no-new-privileges:true']
+    cap_drop: [ALL]
+    # Master process: bind 80/443, switch workers to the nginx user, own its temp directories.
+    cap_add: [NET_BIND_SERVICE, SETUID, SETGID, CHOWN]
+    logging: *logging
+    environment:
+      OPS_PUBLIC_HOST: ${OPS_PUBLIC_HOST:?set OPS_PUBLIC_HOST}
+      OPS_HTTPS_PORT: ${OPS_HTTPS_PORT:-443}
+      NGINX_ENVSUBST_OUTPUT_DIR: /etc/nginx/conf.d
+    volumes:
+      - ../nginx/prod/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ../nginx/prod/snippets:/etc/nginx/snippets:ro
+      - ../nginx/prod/templates:/etc/nginx/templates:ro
+      - ${OPS_TLS_DIR:?set OPS_TLS_DIR (fullchain.pem + privkey.pem)}:/etc/nginx/tls:ro
+      - ${OPS_ACME_WEBROOT:-/var/lib/company-ops/acme}:/var/www/acme:ro
+    tmpfs:
+      - /etc/nginx/conf.d:size=1m
+      - /var/cache/nginx:size=64m
+      - /var/run/nginx:size=1m
+      - /tmp:size=16m
+    ports:
+      - '${OPS_HTTP_PORT:-80}:80'
+      - '${OPS_HTTPS_PORT:-443}:443'
+    networks: [edge]
+    depends_on:
+      web:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:8081/nginx-health']
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  web:
+    <<: *hardening
+    image: ${OPS_IMAGE_REGISTRY:-ops}/ops-web:${OPS_VERSION:?set OPS_VERSION}
+    environment:
+      <<: *app-env
+      API_INTERNAL_URL: http://api:4000
+      STORAGE_PUBLIC_ORIGIN: ${STORAGE_PUBLIC_ORIGIN:-}
+    tmpfs:
+      - /tmp:size=64m
+      - /app/apps/web/.next/cache:size=128m,uid=1000,gid=1000
+    networks: [edge]
+    stop_grace_period: 20s
+    mem_limit: 512m
+    pids_limit: 256
+
+  api:
+    <<: *hardening
+    image: ${OPS_IMAGE_REGISTRY:-ops}/ops-api:${OPS_VERSION:?set OPS_VERSION}
+    env_file: ${OPS_APP_ENV_FILE:?set OPS_APP_ENV_FILE}
+    environment:
+      <<: *app-env
+      API_PORT: '4000'
+      API_OPS_PORT: '9464'
+      API_OPS_HOST: 0.0.0.0
+      TRUST_PROXY_HOPS: '1'
+      DATABASE_URL_FILE: /run/secrets/database_url
+      REDIS_URL_FILE: /run/secrets/redis_url
+      OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
+      APP_ENCRYPTION_KEY_FILE: /run/secrets/app_encryption_key
+      APP_ENCRYPTION_KEYS_PREVIOUS_FILE: /run/secrets/app_encryption_keys_previous
+      S3_SECRET_ACCESS_KEY_FILE: /run/secrets/s3_secret_access_key
+    secrets:
+      [
+        database_url,
+        redis_url,
+        oidc_client_secret,
+        app_encryption_key,
+        app_encryption_keys_previous,
+        s3_secret_access_key,
+      ]
+    tmpfs:
+      - /tmp:size=64m
+    # OIDC discovery and token calls go to the public issuer URL; resolve it to this host's proxy.
+    extra_hosts:
+      - '${OPS_PUBLIC_HOST}:host-gateway'
+    networks: [edge, data]
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+      redis:
+        condition: service_healthy
+        required: false
+      keycloak:
+        condition: service_healthy
+        required: false
+    stop_grace_period: 30s
+    mem_limit: 1g
+    pids_limit: 512
+
+  worker:
+    <<: *hardening
+    image: ${OPS_IMAGE_REGISTRY:-ops}/ops-worker:${OPS_VERSION:?set OPS_VERSION}
+    env_file: ${OPS_APP_ENV_FILE:?set OPS_APP_ENV_FILE}
+    environment:
+      <<: *app-env
+      WORKER_OPS_PORT: '4001'
+      WORKER_OPS_HOST: 0.0.0.0
+      DATABASE_URL_FILE: /run/secrets/database_url
+      REDIS_URL_FILE: /run/secrets/redis_url
+      APP_ENCRYPTION_KEY_FILE: /run/secrets/app_encryption_key
+      APP_ENCRYPTION_KEYS_PREVIOUS_FILE: /run/secrets/app_encryption_keys_previous
+      S3_SECRET_ACCESS_KEY_FILE: /run/secrets/s3_secret_access_key
+    secrets: [database_url, redis_url, app_encryption_key, app_encryption_keys_previous, s3_secret_access_key]
+    tmpfs:
+      - /tmp:size=64m
+    networks: [edge, data]
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+      redis:
+        condition: service_healthy
+        required: false
+    # Jobs finish or return to the queue (stalled-job recovery) within this window.
+    stop_grace_period: 45s
+    mem_limit: 1g
+    pids_limit: 512
+
+  # One-shot: `docker compose ... run --rm migrate` before starting a new release (DEPLOYMENT §8).
+  migrate:
+    <<: *hardening
+    restart: 'no'
+    profiles: [migrate]
+    image: ${OPS_IMAGE_REGISTRY:-ops}/ops-migrate:${OPS_VERSION:?set OPS_VERSION}
+    environment:
+      <<: *app-env
+      DATABASE_MIGRATION_URL_FILE: /run/secrets/database_migration_url
+    secrets: [database_migration_url]
+    tmpfs:
+      - /tmp:size=64m
+    networks: [data]
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+
+  # One-shot logical backup with the read-only ops_backup role (docs/runbooks/backup-restore.md):
+  # `docker compose ... --profile backup run --rm backup`, scheduled by the host's cron/systemd timer.
+  backup:
+    <<: *hardening
+    restart: 'no'
+    profiles: [backup]
+    image: postgres:18.6@sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722
+    user: '999:999'
+    entrypoint: ['bash', '/opt/backup/pg-backup.sh']
+    environment:
+      PGHOST: ${OPS_BACKUP_PGHOST:-postgres}
+      PGUSER: ops_backup
+      PGPASSWORD_FILE: /run/secrets/ops_backup_db_password
+      OPS_BACKUP_RETENTION_DAYS: ${OPS_BACKUP_RETENTION_DAYS:-14}
+    secrets: [ops_backup_db_password]
+    volumes:
+      - ../backup:/opt/backup:ro
+      - ${OPS_BACKUP_DIR:-/var/backups/company-ops}:/backup
+    tmpfs:
+      - /tmp:size=16m
+    networks: [data]
+
+  postgres:
+    image: postgres:18.6@sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722
+    restart: unless-stopped
+    # The image's postgres user from the start: the entrypoint never runs as root and never needs gosu.
+    user: '999:999'
+    security_opt: ['no-new-privileges:true']
+    logging: *logging
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superuser_password
+      POSTGRES_DB: postgres
+      OPS_APP_DB_PASSWORD_FILE: /run/secrets/ops_app_db_password
+      OPS_MIGRATOR_DB_PASSWORD_FILE: /run/secrets/ops_migrator_db_password
+      OPS_BACKUP_DB_PASSWORD_FILE: /run/secrets/ops_backup_db_password
+      KEYCLOAK_DB_PASSWORD_FILE: /run/secrets/keycloak_db_password
+    secrets:
+      - postgres_superuser_password
+      - ops_app_db_password
+      - ops_migrator_db_password
+      - ops_backup_db_password
+      - keycloak_db_password
+    command:
+      - postgres
+      - -c
+      - password_encryption=scram-sha-256
+      - -c
+      - log_min_duration_statement=1000
+      - -c
+      - log_lock_waits=on
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-512MB}
+      - -c
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-200}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ../docker/postgres/prod-init:/docker-entrypoint-initdb.d:ro
+    shm_size: 256m
+    networks: [data]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d company_ops && pg_isready -U postgres -d keycloak']
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    stop_grace_period: 60s
+
+  redis:
+    image: redis:8.10.2@sha256:6f81e8915c60b065a524e6967e0ad1c639ba6efa84d669f823683ea04d9150ee
+    restart: unless-stopped
+    read_only: true
+    security_opt: ['no-new-privileges:true']
+    logging: *logging
+    user: '999:999'
+    secrets: [redis_password]
+    # The password is written to a tmpfs config file, never onto the command line (visible in `ps`).
+    # noeviction: BullMQ requires it; sessions and caches carry their own TTLs (docs/runbooks/redis.md).
+    command:
+      - sh
+      - -c
+      - >-
+        umask 077 &&
+        printf 'requirepass "%s"\n' "$$(cat /run/secrets/redis_password)" > /tmp/redis.conf &&
+        exec redis-server /tmp/redis.conf
+        --appendonly yes --appendfsync everysec
+        --maxmemory ${REDIS_MAXMEMORY:-768mb} --maxmemory-policy noeviction
+        --save 900 1 --save 300 100
+        --protected-mode yes
+    tmpfs:
+      - /tmp:size=1m,uid=999,gid=999,mode=0700
+    volumes:
+      - redis-data:/data
+    networks: [data]
+    healthcheck:
+      test: ['CMD-SHELL', 'REDISCLI_AUTH="$$(cat /run/secrets/redis_password)" redis-cli ping | grep -q PONG']
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    stop_grace_period: 30s
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.0@sha256:b0f60d489d51c5d113390bdf5461d4c06e6051be026c05549f2e1e10ec352bcc
+    restart: unless-stopped
+    security_opt: ['no-new-privileges:true']
+    cap_drop: [ALL]
+    logging: *logging
+    # Secrets are exported from files for this process only (Keycloak has no *_FILE support). The realm is
+    # imported once, when it does not exist yet; it contains no users (infra/docker/keycloak/realms-prod).
+    entrypoint:
+      - /bin/bash
+      - -c
+      - >-
+        export KC_DB_PASSWORD="$$(< /run/secrets/keycloak_db_password)"
+        KC_BOOTSTRAP_ADMIN_PASSWORD="$$(< /run/secrets/keycloak_admin_password)"
+        OIDC_CLIENT_SECRET="$$(< /run/secrets/oidc_client_secret)" &&
+        exec /opt/keycloak/bin/kc.sh start --import-realm
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://${KEYCLOAK_DB_HOST:-postgres}:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME:-ops-admin}
+      KC_HOSTNAME: https://${OPS_PUBLIC_HOST}:${OPS_HTTPS_PORT:-443}/auth
+      # Administration only through an SSH tunnel to the loopback-bound port (docs/runbooks/keycloak.md).
+      KC_HOSTNAME_ADMIN: http://127.0.0.1:${KC_ADMIN_TUNNEL_PORT:-8090}/auth
+      KC_HTTP_RELATIVE_PATH: /auth
+      KC_HTTP_ENABLED: 'true'
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: 'true'
+      KC_LOG_CONSOLE_OUTPUT: json
+      # Realm import placeholders.
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:?set APP_PUBLIC_URL}
+      OIDC_BACKCHANNEL_LOGOUT_URL: http://api:4000/api/v1/auth/backchannel-logout
+    secrets: [keycloak_db_password, keycloak_admin_password, oidc_client_secret]
+    volumes:
+      - ../docker/keycloak/realms-prod:/opt/keycloak/data/import:ro
+    ports:
+      - '127.0.0.1:${KC_ADMIN_TUNNEL_PORT:-8090}:8080'
+    networks: [edge, data]
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -c
+        - 'exec 3<>/dev/tcp/127.0.0.1/9000 && printf ''GET /auth/health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n'' >&3 && head -n 1 <&3 | grep -q " 200 "'
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 60s
+    mem_limit: 1536m
+
+networks:
+  # Proxy <-> applications, and outbound traffic (OIDC, Jira, GitHub, SMTP, object storage).
+  edge:
+    driver: bridge
+  # Data stores; no route outside the host.
+  data:
+    driver: bridge
+    internal: true
+
+volumes:
+  postgres-data:
+  redis-data:
+
+secrets:
+  database_url:
+    file: ${OPS_SECRETS_DIR:?set OPS_SECRETS_DIR}/database_url
+  database_migration_url:
+    file: ${OPS_SECRETS_DIR}/database_migration_url
+  redis_url:
+    file: ${OPS_SECRETS_DIR}/redis_url
+  oidc_client_secret:
+    file: ${OPS_SECRETS_DIR}/oidc_client_secret
+  app_encryption_key:
+    file: ${OPS_SECRETS_DIR}/app_encryption_key
+  # Retired keys still needed for decryption, `id:base64` comma-separated; empty when none (docs/runbooks/secrets.md).
+  app_encryption_keys_previous:
+    file: ${OPS_SECRETS_DIR}/app_encryption_keys_previous
+  s3_secret_access_key:
+    file: ${OPS_SECRETS_DIR}/s3_secret_access_key
+  postgres_superuser_password:
+    file: ${OPS_SECRETS_DIR}/postgres_superuser_password
+  ops_app_db_password:
+    file: ${OPS_SECRETS_DIR}/ops_app_db_password
+  ops_migrator_db_password:
+    file: ${OPS_SECRETS_DIR}/ops_migrator_db_password
+  ops_backup_db_password:
+    file: ${OPS_SECRETS_DIR}/ops_backup_db_password
+  keycloak_db_password:
+    file: ${OPS_SECRETS_DIR}/keycloak_db_password
+  keycloak_admin_password:
+    file: ${OPS_SECRETS_DIR}/keycloak_admin_password
+  redis_password:
+    file: ${OPS_SECRETS_DIR}/redis_password

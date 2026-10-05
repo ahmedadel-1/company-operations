@@ -1,0 +1,44 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# builds
+dist/
+build/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+coverage/
+next-env.d.ts
+
+# generated (recreated by `pnpm db:generate`)
+packages/db/src/generated/
+
+# env & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+infra/nginx/certs/*
+!infra/nginx/certs/README.md
+
+# tests
+playwright-report/
+test-results/
+blob-report/
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json

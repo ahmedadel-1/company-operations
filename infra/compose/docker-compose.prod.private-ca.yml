@@ -1,0 +1,17 @@
+# Private certificate authority (docs/runbooks/tls-and-proxy.md §Certificates). Add after
+# docker-compose.prod.yml when the public certificate, the object storage, SMTP or a managed database is
+# signed by a CA that Node.js does not trust by default. Put the CA certificate(s), PEM, in
+# OPS_SECRETS_DIR/private_ca.pem. Node adds them to its bundled roots; nothing else is trusted less.
+services:
+  api:
+    environment:
+      NODE_EXTRA_CA_CERTS: /run/secrets/private_ca
+    secrets: [private_ca]
+  worker:
+    environment:
+      NODE_EXTRA_CA_CERTS: /run/secrets/private_ca
+    secrets: [private_ca]
+
+secrets:
+  private_ca:
+    file: ${OPS_SECRETS_DIR}/private_ca.pem

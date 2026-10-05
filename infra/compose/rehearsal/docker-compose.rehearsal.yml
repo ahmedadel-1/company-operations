@@ -1,0 +1,62 @@
+# LOCAL REHEARSAL ONLY - NEVER USE IN PRODUCTION.
+# Runs the production stack (docker-compose.prod.yml, unchanged) on a workstation for release testing
+# (scripts/release/rehearse.ts): SeaweedFS stands in for the operator's S3 service behind a separate
+# files host, and the API trusts the rehearsal's self-signed CA. Everything else is the production
+# configuration with production validation (NODE_ENV=production).
+services:
+  proxy:
+    environment:
+      OPS_FILES_HOST: ${OPS_FILES_HOST:?set OPS_FILES_HOST}
+    volumes:
+      # Production templates plus the files host (copied together by the rehearsal script). Relative
+      # paths resolve against the first Compose file's directory (infra/compose).
+      - ./rehearsal/rehearsal-templates:/etc/nginx/templates:ro
+
+  api:
+    environment:
+      NODE_EXTRA_CA_CERTS: /run/secrets/rehearsal_ca
+      S3_ACCESS_KEY_ID_FILE: /run/secrets/s3_access_key_id
+    secrets: [rehearsal_ca, s3_access_key_id]
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+
+  worker:
+    environment:
+      S3_ACCESS_KEY_ID_FILE: /run/secrets/s3_access_key_id
+    secrets: [s3_access_key_id]
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+    restart: unless-stopped
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        export AWS_ACCESS_KEY_ID="$$(cat /run/secrets/s3_access_key_id)"
+        AWS_SECRET_ACCESS_KEY="$$(cat /run/secrets/s3_secret_access_key)" &&
+        exec /entrypoint.sh mini -dir=/data
+    environment:
+      S3_BUCKET: ${S3_BUCKET:-company-ops}
+    secrets: [s3_access_key_id, s3_secret_access_key]
+    volumes:
+      - seaweedfs-data:/data
+    networks: [edge]
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:8333/healthz']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+volumes:
+  seaweedfs-data:
+
+secrets:
+  rehearsal_ca:
+    file: ${OPS_SECRETS_DIR}/rehearsal_ca.pem
+  s3_access_key_id:
+    file: ${OPS_SECRETS_DIR}/s3_access_key_id

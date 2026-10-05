@@ -1,0 +1,25 @@
+{
+  "name": "@company-ops/e2e",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint .",
+    "test:e2e": "playwright test",
+    "browsers:install": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
+    "@company-ops/config": "workspace:*",
+    "@company-ops/core": "workspace:*",
+    "@company-ops/db": "workspace:*",
+    "@company-ops/eslint-config": "workspace:*",
+    "@company-ops/shared": "workspace:*",
+    "@playwright/test": "1.63.0",
+    "@types/node": "24.19.1",
+    "eslint": "10.11.0",
+    "testcontainers": "12.2.0",
+    "typescript": "6.0.3"
+  }
+}

@@ -1,0 +1,151 @@
+# Rendered at container start by the nginx image (envsubst of defined variables only):
+#   OPS_PUBLIC_HOST  public host name (certificate subject), e.g. ops.example.com
+#   OPS_HTTPS_PORT   public HTTPS port (443 unless the host maps another one)
+
+# Plain HTTP: ACME HTTP-01 challenges, then a permanent redirect to the one canonical host. The redirect
+# never reflects the client's Host header.
+server {
+  listen 80 default_server;
+  server_name _;
+
+  location /.well-known/acme-challenge/ {
+    root /var/www/acme;
+    default_type text/plain;
+  }
+
+  location / {
+    return 308 https://${OPS_PUBLIC_HOST}:${OPS_HTTPS_PORT}$request_uri;
+  }
+}
+
+# TLS for any other server name (or no SNI) is refused during the handshake.
+server {
+  listen 443 ssl default_server;
+  server_name _;
+  ssl_reject_handshake on;
+}
+
+server {
+  listen 443 ssl;
+  http2 on;
+  server_name ${OPS_PUBLIC_HOST};
+
+  ssl_certificate /etc/nginx/tls/fullchain.pem;
+  ssl_certificate_key /etc/nginx/tls/privkey.pem;
+
+  # Two years; add `preload` only after reading docs/runbooks/tls-and-proxy.md (it is hard to undo).
+  add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+
+  limit_conn ops_conn 100;
+
+  # Edge limiter rejections use the API's error envelope and tell clients when to retry. A location-level
+  # add_header replaces the inherited ones, so HSTS is repeated here.
+  error_page 429 = @ops_rate_limited;
+  location @ops_rate_limited {
+    default_type application/json;
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+    add_header Retry-After 1 always;
+    add_header Cache-Control no-store always;
+    return 429 '{"error":{"code":"RATE_LIMITED","message":"Too many requests. Try again shortly.","requestId":"$ops_request_id"}}';
+  }
+
+  # An unreachable upstream (restart, deploy, outage) answers 503 with Retry-After instead of nginx's
+  # bare 502 page: the error envelope for API clients (snippets/api-errors.conf), a static page for
+  # browsers.
+  error_page 502 503 504 = @ops_unavailable;
+  location @ops_api_unavailable {
+    default_type application/json;
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+    add_header Retry-After 5 always;
+    add_header Cache-Control no-store always;
+    return 503 '{"error":{"code":"DEPENDENCY_UNAVAILABLE","message":"A required service is temporarily unavailable.","requestId":"$ops_request_id"}}';
+  }
+  location @ops_unavailable {
+    default_type text/html;
+    charset utf-8;
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+    add_header Retry-After 5 always;
+    add_header Cache-Control no-store always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header Content-Security-Policy "default-src 'none'; frame-ancestors 'none'" always;
+    return 503 '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Company Operations is temporarily unavailable</title><h1>Temporarily unavailable</h1><p>Company Operations is restarting or under maintenance. Try again in a moment.</p><p lang="ar" dir="rtl">الخدمة غير متاحة مؤقتًا. حاول مرة أخرى بعد قليل.</p></html>';
+  }
+
+  set $ops_web http://web:3000;
+  set $ops_api http://api:4000;
+  set $ops_idp http://keycloak:8080;
+
+  # Live updates (Server-Sent Events): no buffering, read timeout above the 25 s heartbeat.
+  location = /api/v1/notifications/events/stream {
+    include /etc/nginx/snippets/proxy-headers.conf;
+    include /etc/nginx/snippets/api-errors.conf;
+    proxy_set_header Connection "";
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 120s;
+    proxy_pass $ops_api;
+  }
+
+  # Jira and GitHub webhooks: bodies up to GITHUB_WEBHOOK_MAX_BYTES (5 MiB default) passed unmodified.
+  location /api/v1/webhooks/ {
+    include /etc/nginx/snippets/proxy-headers.conf;
+    include /etc/nginx/snippets/api-errors.conf;
+    client_max_body_size 6m;
+    limit_req zone=ops_webhooks burst=100 nodelay;
+    proxy_pass $ops_api;
+  }
+
+  location ~ ^/api/v1/auth/(login|callback)$ {
+    include /etc/nginx/snippets/proxy-headers.conf;
+    limit_req zone=ops_auth burst=20 nodelay;
+    proxy_pass $ops_api;
+  }
+
+  # The OpenAPI UI is disabled in production (SWAGGER_ENABLED is rejected); never route it.
+  location /api/v1/docs {
+    return 404;
+  }
+
+  location /api/ {
+    include /etc/nginx/snippets/proxy-headers.conf;
+    include /etc/nginx/snippets/api-errors.conf;
+    limit_req zone=ops_api burst=200 nodelay;
+    proxy_pass $ops_api;
+  }
+
+  # Keycloak administration (master realm and every realm's admin API) is reachable only through the
+  # loopback-bound admin port over an SSH tunnel (docs/runbooks/keycloak.md), never from the internet.
+  location ^~ /auth/admin/ {
+    return 404;
+  }
+  location ^~ /auth/realms/master/ {
+    return 404;
+  }
+
+  location /auth/ {
+    include /etc/nginx/snippets/proxy-headers.conf;
+    limit_req zone=ops_idp burst=50 nodelay;
+    # Keycloak's sign-in responses carry large cookies and headers.
+    proxy_buffer_size 128k;
+    proxy_buffers 4 256k;
+    proxy_busy_buffers_size 256k;
+    proxy_pass $ops_idp;
+  }
+
+  location / {
+    include /etc/nginx/snippets/proxy-headers.conf;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    limit_req zone=ops_api burst=200 nodelay;
+    proxy_pass $ops_web;
+  }
+}
+
+# Proxy health for the container health check; loopback only.
+server {
+  listen 127.0.0.1:8081;
+  access_log off;
+  location = /nginx-health {
+    return 200 "ok\n";
+  }
+}

@@ -1,0 +1,38 @@
+# Build context for infra/docker/app.Dockerfile. Only sources and the lockfile enter the image build;
+# never secrets, local builds or test output.
+**/node_modules
+**/.pnpm-store
+**/dist
+**/build
+**/.next
+**/out
+**/.turbo
+**/*.tsbuildinfo
+**/coverage
+**/next-env.d.ts
+packages/db/src/generated
+
+# env & secrets
+**/.env
+**/.env.*
+!.env.example
+**/*.pem
+**/*.key
+**/secrets
+infra/nginx/certs
+infra/backup/out
+
+# tests and reports
+**/playwright-report
+**/test-results
+**/blob-report
+**/*.log
+reports
+
+# VCS, editors, OS
+.git
+.github
+.idea
+.vscode
+**/.DS_Store
+**/Thumbs.db
